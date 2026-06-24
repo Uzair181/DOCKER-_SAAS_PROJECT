@@ -1,15 +1,15 @@
-﻿# Docker SaaS Platform
+# Docker SaaS Platform
 
 A multi-service SaaS starter built with Node.js, Express, Prisma, PostgreSQL, Redis, and Docker.
 
-This repository currently implements a secure foundation for a real SaaS backend:
+This repository now implements a real backend foundation rather than a toy demo:
 
-- API gateway with route protection and request logging
-- Auth service with password hashing and JWT access/refresh tokens
-- User service with Prisma models, CRUD endpoints, soft deletes, and audit logs
-- Product service with CRUD endpoints and role-based write protection
+- API gateway with route protection, request validation, request logging, and Redis-backed rate limiting
+- Auth service with bcrypt password hashing and JWT access/refresh tokens
+- User service with Prisma models, CRUD endpoints, soft deletes, audit logs, and product persistence
+- Product service as a thin facade over the database-backed product endpoints
 - Notification service with a background queue-style worker
-- Docker Compose setup with Postgres, Redis, health checks, and restart policies
+- Docker Compose setup with Postgres, Redis, health checks, restart policies, and volumes
 
 ## What We Implemented
 
@@ -24,14 +24,14 @@ Implemented behavior:
 - Routes `/api/products` to the product service
 - Verifies JWT access tokens for protected routes
 - Adds `x-user-id`, `x-user-email`, and `x-user-role` headers for downstream services
-- Applies basic in-memory rate limiting
+- Applies Redis-backed rate limiting, with an in-memory fallback if Redis is unavailable
 - Logs every request with method, path, status, duration, and user info
 - Validates basic request bodies for auth and product endpoints
 
 Important note:
 
-- The gateway currently verifies JWTs locally using the shared secret.
-- Rate limiting is in-memory right now. Redis is provisioned in Docker, but not yet wired into the gateway cache layer.
+- The gateway verifies JWTs locally using the shared secret.
+- Rate limiting uses Redis when possible, which is the correct production direction for a shared counter.
 
 ### 2. Auth Service
 
@@ -58,8 +58,8 @@ Implemented behavior:
 
 Important note:
 
-- Auth state is still stored in memory inside the auth service process.
-- That means tokens and users are not persistent across restarts yet.
+- Auth sessions are stored in Redis when available, with in-memory fallback if Redis is not reachable.
+- That gives the auth service durable refresh-token storage in the normal Docker setup.
 
 ### 3. User Service
 
@@ -69,7 +69,6 @@ Implemented behavior:
 
 - `POST /users`
   - Creates a user profile
-  - Accepts id, name, email, and role
 - `GET /users`
   - Returns all active users
   - Supports `includeDeleted=true`
@@ -79,12 +78,22 @@ Implemented behavior:
   - Updates name, email, and role
 - `DELETE /users/:id`
   - Soft deletes the user instead of removing the row
+- `GET /products`
+  - Returns all active products
+- `GET /products/:id`
+  - Returns one product
+- `POST /products`
+  - Creates a product in PostgreSQL
+- `PATCH /products/:id`
+  - Updates a product
+- `DELETE /products/:id`
+  - Soft deletes a product
 - `GET /health`
   - Returns service status
 
 Database changes:
 
-- `User` model now includes:
+- `User` model includes:
   - `id`
   - `name`
   - `email`
@@ -92,12 +101,13 @@ Database changes:
   - `createdAt`
   - `updatedAt`
   - `deletedAt`
-- `AuditLog` model now stores create/update/delete events
+- `AuditLog` model stores create/update/delete events
+- `Product` model now stores product records in PostgreSQL
 - `UserRole` enum supports `ADMIN`, `MANAGER`, and `USER`
 
 ### 4. Product Service
 
-The product service is a first-pass implementation of a product module.
+The product service is now a dedicated microservice that forwards requests to the database-backed product endpoints.
 
 Implemented behavior:
 
@@ -112,8 +122,8 @@ Implemented behavior:
 
 Important note:
 
-- Product data is currently stored in memory.
-- This service is intentionally scaffolded so we can later move it to Prisma/Postgres like the user service.
+- Product data is stored in PostgreSQL through the user service's Prisma client.
+- The product service stays as a separate service boundary, which is useful for future extraction.
 
 ### 5. Notification Service
 
@@ -183,14 +193,15 @@ Example flows:
 - `POST /api/products`
   - Gateway verifies the access token
   - Gateway checks the user role
-  - Product service accepts or rejects the write
+  - Product service forwards the request to the user service
+  - User service persists the product in PostgreSQL
 
 ## Project Structure
 
 - `gateway/` - API entry point and request proxy
 - `auth-service/` - registration, login, token flows
-- `user-service/` - Prisma-backed user management
-- `product-service/` - product CRUD service
+- `user-service/` - Prisma-backed user and product management
+- `product-service/` - product API façade
 - `notification-service/` - async-style job consumer
 - `docker-compose.yml` - full local stack
 - `IMPLEMENTATION_PLAN.md` - phased roadmap
@@ -203,6 +214,7 @@ Example flows:
 - `AUTH_SERVICE_URL`
 - `USER_SERVICE_URL`
 - `PRODUCT_SERVICE_URL`
+- `REDIS_URL`
 - `JWT_SECRET`
 - `RATE_LIMIT_WINDOW_MS`
 - `RATE_LIMIT_MAX`
@@ -222,6 +234,11 @@ Example flows:
 
 - `PORT`
 - `DATABASE_URL`
+
+### Product Service
+
+- `PORT`
+- `USER_SERVICE_URL`
 
 ### Docker Compose Defaults
 
@@ -247,9 +264,9 @@ Service ports:
 - PostgreSQL: `localhost:5432`
 - Redis: `localhost:6379`
 
-### User Service Prisma
+### Prisma
 
-The user service schema has already been generated locally. If you change the schema again, run:
+The user service schema and migration history are checked in. If you change the schema again, regenerate the client with:
 
 ```bash
 cd user-service
@@ -304,9 +321,6 @@ Authorization: Bearer <access-token>
 
 The current implementation is a strong foundation, but some enterprise features are still future work:
 
-- Redis-backed caching for responses and sessions
-- Persistent auth sessions and refresh tokens
-- Prisma/Postgres-backed product service
 - Real message broker support like RabbitMQ or Kafka
 - Centralized structured logging with Winston or Pino
 - Error tracking with Sentry
@@ -317,10 +331,10 @@ The current implementation is a strong foundation, but some enterprise features 
 
 This repo now behaves like a real SaaS backend starter instead of a demo:
 
-- Authentication is secured
-- Users are stored in a real database
-- The gateway protects private APIs
-- Products and notifications are scaffolded as separate services
+- Authentication is secured and refresh sessions are Redis-backed
+- Users and products are stored in PostgreSQL
+- The gateway protects private APIs and uses Redis for rate limiting
+- Notifications are handled through a dedicated worker service
 - Docker Compose provisions the complete local environment
 
-The next best step is to make auth persistence and Redis caching fully real so the system survives restarts and scales better.
+The next best step is to add automated tests, structured logging, and a real broker for notifications.

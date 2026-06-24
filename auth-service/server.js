@@ -5,6 +5,7 @@ const express = require("express");
 const axios = require("axios");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const { RedisClient } = require("./redis-client");
 
 const app = express();
 app.use(express.json());
@@ -12,6 +13,7 @@ app.use(express.json());
 const USER_SERVICE_URL = process.env.USER_SERVICE_URL || "http://localhost:4002";
 const NOTIFICATION_SERVICE_URL =
   process.env.NOTIFICATION_SERVICE_URL || "http://localhost:4004";
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const JWT_SECRET = process.env.JWT_SECRET || "dev-access-secret";
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "dev-refresh-secret";
 const ACCESS_TOKEN_EXPIRES_IN = process.env.ACCESS_TOKEN_EXPIRES_IN || "15m";
@@ -21,6 +23,8 @@ const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS || 12);
 const usersByEmail = new Map();
 const usersById = new Map();
 const allowedRoles = new Set(["admin", "manager", "user"]);
+const redis = new RedisClient(REDIS_URL);
+let redisAvailable = false;
 
 const requireFields = (body, fields) => {
   const missing = fields.filter((field) => {
@@ -39,6 +43,57 @@ const publicUser = (record) => ({
   createdAt: record.createdAt,
   updatedAt: record.updatedAt,
 });
+
+const userKeyByEmail = (email) => `auth:user:email:${email}`;
+const userKeyById = (id) => `auth:user:id:${id}`;
+
+const persistUser = async (record) => {
+  const serialized = JSON.stringify(record);
+  await Promise.all([
+    redis.set(userKeyByEmail(record.email), serialized),
+    redis.set(userKeyById(record.id), serialized),
+  ]);
+};
+
+const saveUserRecord = async (record) => {
+  try {
+    await persistUser(record);
+    redisAvailable = true;
+  } catch (error) {
+    redisAvailable = false;
+    console.log(`Redis save fallback in auth service: ${error.message}`);
+  }
+};
+
+const loadUserByEmail = async (email) => {
+  const cached = usersByEmail.get(email);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const raw = await redis.get(userKeyByEmail(email));
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    redisAvailable = false;
+    return null;
+  }
+};
+
+const loadUserById = async (id) => {
+  const cached = usersById.get(id);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const raw = await redis.get(userKeyById(id));
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    redisAvailable = false;
+    return null;
+  }
+};
 
 const issueTokens = (user) => {
   const payload = {
@@ -114,6 +169,7 @@ app.post("/register", async (req, res) => {
 
     usersByEmail.set(email, record);
     usersById.set(id, record);
+    await saveUserRecord(record);
 
     const tokens = issueTokens(record);
     record.refreshTokenHash = await bcrypt.hash(tokens.refreshToken, BCRYPT_ROUNDS);
@@ -150,7 +206,7 @@ app.post("/login", async (req, res) => {
 
     const email = String(req.body.email).trim().toLowerCase();
     const password = String(req.body.password);
-    const user = usersByEmail.get(email);
+    const user = await loadUserByEmail(email);
 
     if (!user) {
       return res.status(401).json({ error: "Invalid email or password" });
@@ -164,6 +220,9 @@ app.post("/login", async (req, res) => {
     const tokens = issueTokens(user);
     user.refreshTokenHash = await bcrypt.hash(tokens.refreshToken, BCRYPT_ROUNDS);
     user.updatedAt = new Date().toISOString();
+    usersByEmail.set(email, user);
+    usersById.set(user.id, user);
+    await saveUserRecord(user);
 
     return res.json({
       user: publicUser(user),
@@ -188,7 +247,7 @@ app.post("/refresh", async (req, res) => {
 
     const refreshToken = String(req.body.refreshToken);
     const payload = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
-    const user = usersById.get(payload.sub);
+    const user = await loadUserById(payload.sub);
 
     if (!user || !user.refreshTokenHash) {
       return res.status(401).json({ error: "Invalid refresh token" });
@@ -206,6 +265,9 @@ app.post("/refresh", async (req, res) => {
     const tokens = issueTokens(user);
     user.refreshTokenHash = await bcrypt.hash(tokens.refreshToken, BCRYPT_ROUNDS);
     user.updatedAt = new Date().toISOString();
+    usersByEmail.set(user.email, user);
+    usersById.set(user.id, user);
+    await saveUserRecord(user);
 
     return res.json({
       user: publicUser(user),
@@ -227,11 +289,14 @@ app.post("/logout", async (req, res) => {
 
   try {
     const payload = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
-    const user = usersById.get(payload.sub);
+    const user = await loadUserById(payload.sub);
 
     if (user) {
       user.refreshTokenHash = null;
       user.updatedAt = new Date().toISOString();
+      usersByEmail.set(user.email, user);
+      usersById.set(user.id, user);
+      await saveUserRecord(user);
     }
 
     return res.json({ message: "Logged out successfully" });
@@ -251,3 +316,14 @@ app.get("/health", (req, res) => {
 app.listen(process.env.PORT || 4001, () => {
   console.log("Auth service running on port 4001");
 });
+
+redis
+  .get("healthcheck")
+  .then(() => {
+    redisAvailable = true;
+    console.log("Redis-backed auth sessions enabled");
+  })
+  .catch((error) => {
+    redisAvailable = false;
+    console.log(`Redis unavailable for auth service, using memory fallback: ${error.message}`);
+  });

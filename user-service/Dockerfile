@@ -11,4 +11,4 @@ RUN npx prisma generate
 
 EXPOSE 4002
 
-CMD ["sh", "-c", "npx prisma db push && node server.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]

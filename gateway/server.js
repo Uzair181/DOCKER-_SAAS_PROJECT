@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const express = require("express");
 const { createProxyMiddleware } = require("http-proxy-middleware");
+const { RedisClient } = require("./redis-client");
 
 const app = express();
 app.use(express.json());
@@ -8,11 +9,14 @@ app.use(express.json());
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || "http://localhost:4001";
 const USER_SERVICE_URL = process.env.USER_SERVICE_URL || "http://localhost:4002";
 const PRODUCT_SERVICE_URL = process.env.PRODUCT_SERVICE_URL || "http://localhost:4003";
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const JWT_SECRET = process.env.JWT_SECRET || "dev-access-secret";
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
 const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 120);
 
 const rateLimits = new Map();
+const redis = new RedisClient(REDIS_URL);
+let redisAvailable = false;
 
 const base64UrlDecode = (value) => Buffer.from(value, "base64url").toString("utf8");
 
@@ -58,21 +62,42 @@ const rateLimit = (req, res, next) => {
     return next();
   }
 
-  const clientId = getClientId(req);
-  const now = Date.now();
-  const current = rateLimits.get(clientId);
+  return (async () => {
+    const clientId = getClientId(req);
 
-  if (!current || current.resetAt <= now) {
-    rateLimits.set(clientId, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    if (redisAvailable) {
+      const key = `rate-limit:${clientId}:${Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS)}`;
+      const current = await redis.incr(key);
+      if (current === 1) {
+        await redis.expire(key, Math.ceil(RATE_LIMIT_WINDOW_MS / 1000));
+      }
+
+      if (current > RATE_LIMIT_MAX) {
+        return sendJsonError(res, 429, "Too many requests");
+      }
+
+      return next();
+    }
+
+    const now = Date.now();
+    const current = rateLimits.get(clientId);
+
+    if (!current || current.resetAt <= now) {
+      rateLimits.set(clientId, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+      return next();
+    }
+
+    if (current.count >= RATE_LIMIT_MAX) {
+      return sendJsonError(res, 429, "Too many requests");
+    }
+
+    current.count += 1;
     return next();
-  }
-
-  if (current.count >= RATE_LIMIT_MAX) {
-    return sendJsonError(res, 429, "Too many requests");
-  }
-
-  current.count += 1;
-  return next();
+  })().catch((error) => {
+    console.error("Redis rate-limit fallback", error.message);
+    redisAvailable = false;
+    return rateLimit(req, res, next);
+  });
 };
 
 const requestLogger = (req, res, next) => {
@@ -252,3 +277,14 @@ app.use((req, res) => {
 app.listen(process.env.PORT || 4000, () => {
   console.log("API Gateway running on port 4000");
 });
+
+redis
+  .ping()
+  .then(() => {
+    redisAvailable = true;
+    console.log("Redis-backed rate limiting enabled");
+  })
+  .catch((error) => {
+    redisAvailable = false;
+    console.log(`Redis unavailable, falling back to memory: ${error.message}`);
+  });
