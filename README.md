@@ -315,26 +315,3 @@ Authorization: Bearer <access-token>
   "stock": 10,
   "description": "Monthly SaaS plan"
 }
-```
-
-## What Is Still Pending
-
-The current implementation is a strong foundation, but some enterprise features are still future work:
-
-- Real message broker support like RabbitMQ or Kafka
-- Centralized structured logging with Winston or Pino
-- Error tracking with Sentry
-- Full request schema validation with a library like Zod or Joi
-- Automated tests
-
-## Summary
-
-This repo now behaves like a real SaaS backend starter instead of a demo:
-
-- Authentication is secured and refresh sessions are Redis-backed
-- Users and products are stored in PostgreSQL
-- The gateway protects private APIs and uses Redis for rate limiting
-- Notifications are handled through a dedicated worker service
-- Docker Compose provisions the complete local environment
-
-The next best step is to add automated tests, structured logging, and a real broker for notifications.
