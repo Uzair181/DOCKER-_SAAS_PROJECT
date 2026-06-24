@@ -227,7 +227,7 @@ app.use(
   createProxyMiddleware({
     target: USER_SERVICE_URL,
     changeOrigin: true,
-    pathRewrite: { "^/api/users": "" },
+    pathRewrite: { "^/api/users": "/users" },
   })
 );
 
@@ -239,7 +239,7 @@ app.use(
   createProxyMiddleware({
     target: PRODUCT_SERVICE_URL,
     changeOrigin: true,
-    pathRewrite: { "^/api/products": "" },
+    pathRewrite: { "^/api/products": "/products" },
   })
 );
 

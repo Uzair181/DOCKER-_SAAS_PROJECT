@@ -31,6 +31,7 @@ services:
     environment:
       PORT: 4001
       USER_SERVICE_URL: http://user-service:4002
+      NOTIFICATION_SERVICE_URL: http://notification-service:4004
       JWT_SECRET: ${JWT_SECRET:-dev-access-secret}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev-refresh-secret}
       ACCESS_TOKEN_EXPIRES_IN: 15m

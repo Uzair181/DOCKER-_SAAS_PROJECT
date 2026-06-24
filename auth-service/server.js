@@ -10,6 +10,8 @@ const app = express();
 app.use(express.json());
 
 const USER_SERVICE_URL = process.env.USER_SERVICE_URL || "http://localhost:4002";
+const NOTIFICATION_SERVICE_URL =
+  process.env.NOTIFICATION_SERVICE_URL || "http://localhost:4004";
 const JWT_SECRET = process.env.JWT_SECRET || "dev-access-secret";
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "dev-refresh-secret";
 const ACCESS_TOKEN_EXPIRES_IN = process.env.ACCESS_TOKEN_EXPIRES_IN || "15m";
@@ -66,6 +68,15 @@ const persistProfile = async ({ id, name, email, role }) => {
   });
 };
 
+const queueWelcomeNotification = async (user) => {
+  await axios.post(`${NOTIFICATION_SERVICE_URL}/internal/notifications`, {
+    type: "welcome-email",
+    to: user.email,
+    subject: "Welcome to the platform",
+    message: `Hi ${user.name}, your account has been created successfully.`,
+  });
+};
+
 app.post("/register", async (req, res) => {
   try {
     const missing = requireFields(req.body, ["name", "email", "password"]);
@@ -107,6 +118,8 @@ app.post("/register", async (req, res) => {
     const tokens = issueTokens(record);
     record.refreshTokenHash = await bcrypt.hash(tokens.refreshToken, BCRYPT_ROUNDS);
     record.updatedAt = new Date().toISOString();
+
+    await Promise.allSettled([queueWelcomeNotification(record)]);
 
     return res.status(201).json({
       user: publicUser(record),
